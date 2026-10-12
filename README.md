@@ -1,7 +1,7 @@
 # Project Ginnunga
 
 [![C++26](https://img.shields.io/badge/C%2B%2B-26%20%2F%2020-blue.svg)](https://isocpp.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 
 > **"In the beginning there was Ginnungagap, the primordial void, where the frost of Niflheim and the sparks of Muspelheim collided to ignite existence."**  
@@ -206,4 +206,6 @@ cmake --build build -j
 ---
 
 ## License
-MIT License. Open for low-latency systems, exchange gateways, network engines, and game backends.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See the [LICENSE](file:///Users/zeeshanqazi/projects/Ginnunga/LICENSE) file for complete terms and conditions.
+
+See [CREDITS.md](file:///Users/zeeshanqazi/projects/Ginnunga/CREDITS.md) for research citations, algorithmic inspirations, and acknowledgments.
