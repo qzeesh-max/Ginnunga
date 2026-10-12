@@ -1,0 +1,70 @@
+#pragma once
+
+#include <list>
+#include <unordered_map>
+#include <optional>
+#include <cstddef>
+#include "ginnunga/concepts/eviction.hpp"
+
+namespace ginnunga::eviction {
+
+/**
+ * @brief LRUPolicy tracks recency of key accesses using a doubly-linked list
+ * and hash map for O(1) hit promotion, insert, and eviction of the least recently used key.
+ */
+template <typename Key>
+class LRUPolicy {
+public:
+    LRUPolicy() = default;
+    ~LRUPolicy() = default;
+
+    void on_hit(const Key& key) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            list_.splice(list_.begin(), list_, it->second);
+        }
+    }
+
+    void on_insert(const Key& key) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            list_.splice(list_.begin(), list_, it->second);
+        } else {
+            list_.push_front(key);
+            map_[key] = list_.begin();
+        }
+    }
+
+    void on_erase(const Key& key) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            list_.erase(it->second);
+            map_.erase(it);
+        }
+    }
+
+    std::optional<Key> evict() {
+        if (list_.empty()) return std::nullopt;
+        Key lru_key = list_.back();
+        list_.pop_back();
+        map_.erase(lru_key);
+        return lru_key;
+    }
+
+    void reset() {
+        list_.clear();
+        map_.clear();
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return list_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return list_.empty(); }
+
+private:
+    std::list<Key> list_;
+    std::unordered_map<Key, typename std::list<Key>::iterator> map_;
+};
+
+static_assert(concepts::EvictionConcept<LRUPolicy<int>, int>,
+              "LRUPolicy must satisfy EvictionConcept");
+
+} // namespace ginnunga::eviction

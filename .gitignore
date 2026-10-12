@@ -1,0 +1,14 @@
+# Build directories
+build/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
