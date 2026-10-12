@@ -1,8 +1,14 @@
-# Project Ginnunga
+<p align="center">
+  <img src="assets/logo.jpg" alt="Ginnunga Logo" width="280" />
+</p>
 
-[![C++26](https://img.shields.io/badge/C%2B%2B-26%20%2F%2020-blue.svg)](https://isocpp.org/)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+<h1 align="center">Project Ginnunga</h1>
+
+<p align="center">
+  <a href="https://isocpp.org/"><img src="https://img.shields.io/badge/C%2B%2B-26%20%2F%2020-blue.svg" alt="C++26" /></a>
+  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3" /></a>
+  <img src="https://img.shields.io/badge/build-passing-brightgreen.svg" alt="Build" />
+</p>
 
 > **"In the beginning there was Ginnungagap, the primordial void, where the frost of Niflheim and the sparks of Muspelheim collided to ignite existence."**  
 > — *The Prose Edda*
