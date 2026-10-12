@@ -1,11 +1,5 @@
 # Credits & Acknowledgments
 
-**Project Ginnunga** is designed and maintained by:
-
-- **Zeeshan Qazi** ([zeeshan@zeeshan.im](mailto:zeeshan@zeeshan.im))
-
----
-
 ## Mythological Inspiration
 
 - **Ginnungagap (Norse Mythology)**: The vast, primordial empty void described in the *Prose Edda* and *Völuspá*, spanning between the burning fires of Muspelheim and the frozen mists of Niflheim. In Project Ginnunga, this serves as the foundational metaphor for a sparse cache: an immense, mostly vacant address space where dense, hot data clusters are dynamically ignited and managed.
