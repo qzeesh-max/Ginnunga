@@ -1,4 +1,6 @@
 #include "test_framework.hpp"
+#include <thread>
+#include <chrono>
 #include "ginnunga/cache.hpp"
 #include "ginnunga/storage/simd_flat_map.hpp"
 #include "ginnunga/storage/slot_array_map.hpp"
@@ -6,6 +8,8 @@
 #include "ginnunga/storage/judy_tree_backend.hpp"
 #include "ginnunga/eviction/lru_policy.hpp"
 #include "ginnunga/eviction/lfu_policy.hpp"
+#include "ginnunga/eviction/arc_policy.hpp"
+#include "ginnunga/eviction/ttl_policy.hpp"
 #include "ginnunga/concurrency/single_threaded.hpp"
 #include "ginnunga/concurrency/epoch_reclamation.hpp"
 
@@ -37,6 +41,9 @@ TEST(Cache, FullLRUCacheLifecycle) {
     ASSERT_TRUE(cache.contains(3));
     ASSERT_TRUE(cache.contains(4));
 
+    ASSERT_EQ(cache.capacity(), 3);
+    ASSERT_TRUE(cache.memory_footprint() > 0);
+
     auto stats = cache.stats();
     ASSERT_EQ(stats.hits, 1);
     ASSERT_EQ(stats.evictions, 1);
@@ -46,6 +53,17 @@ TEST(Cache, FullLRUCacheLifecycle) {
     ASSERT_TRUE(cache.erase(3));
     ASSERT_EQ(cache.size(), 2);
     ASSERT_FALSE(cache.contains(3));
+
+    // Erase non-existent key returns false
+    ASSERT_FALSE(cache.erase(999));
+
+    // Accessors
+    ASSERT_EQ(cache.storage().size(), 2);
+    ASSERT_EQ(cache.eviction().size(), 2);
+    const auto& const_cache = cache;
+    ASSERT_EQ(const_cache.storage().size(), 2);
+    ASSERT_EQ(const_cache.eviction().size(), 2);
+    (void)const_cache.concurrency();
 
     cache.clear();
     ASSERT_EQ(cache.size(), 0);
@@ -60,21 +78,114 @@ TEST(Cache, SimdFlatMapWithEBR) {
         ginnunga::concurrency::EpochReclamation
     >;
 
-    ConcurrentCache cache(100);
+    ConcurrentCache cache(10); // Small capacity of 10 to force evictions with EBR
 
     for (uint64_t i = 1; i <= 20; ++i) {
         ASSERT_TRUE(cache.put(i * 10, static_cast<int>(i * 100)));
     }
 
-    ASSERT_EQ(cache.size(), 20);
+    ASSERT_EQ(cache.size(), 10); // Bound by capacity
 
-    for (uint64_t i = 1; i <= 20; ++i) {
-        auto val = cache.get(i * 10);
-        ASSERT_TRUE(val.has_value());
-        ASSERT_EQ(*val, static_cast<int>(i * 100));
-    }
+    // Non-existent key lookup
+    ASSERT_FALSE(cache.get(99999).has_value());
+    ASSERT_FALSE(cache.contains(99999));
+
+    // Drain EBR retired callbacks from evictions
+    cache.concurrency().synchronize();
 
     std::string json = cache.dump_telemetry_json("TestSimdCache");
     ASSERT_TRUE(!json.empty());
     ASSERT_TRUE(json.find("\"cache_name\": \"TestSimdCache\"") != std::string::npos);
+}
+
+TEST(Cache, PagedSparseArrayWithTTL) {
+    using PagedCache = ginnunga::SparseCache<
+        uint32_t,
+        int,
+        ginnunga::storage::PagedSparseArray<uint32_t, int>,
+        ginnunga::eviction::TTLPolicy<uint32_t>,
+        ginnunga::concurrency::SingleThreaded
+    >;
+
+    PagedCache cache(5);
+    cache.eviction().set_ttl(std::chrono::milliseconds(50));
+
+    cache.put(100, 1000);
+    cache.put(200, 2000);
+    ASSERT_EQ(cache.size(), 2);
+    ASSERT_EQ(cache.get(100).value(), 1000);
+
+    // Sleep past TTL
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    ASSERT_TRUE(cache.eviction().is_expired(100));
+}
+
+TEST(Cache, JudyTreeWithLFU) {
+    using JudyCache = ginnunga::SparseCache<
+        uint32_t,
+        int,
+        ginnunga::storage::JudyTreeBackend<uint32_t, int>,
+        ginnunga::eviction::LFUPolicy<uint32_t>,
+        ginnunga::concurrency::SingleThreaded
+    >;
+
+    JudyCache cache(3); // Capacity 3
+    cache.put(1, 10);
+    cache.put(2, 20);
+    cache.put(3, 30);
+
+    // Hit key 1 twice, key 2 once -> key 3 has lowest freq (1)
+    (void)cache.get(1);
+    (void)cache.get(1);
+    (void)cache.get(2);
+
+    // Put 4th item -> must evict key 3
+    cache.put(4, 40);
+    ASSERT_EQ(cache.size(), 3);
+    ASSERT_TRUE(cache.contains(1));
+    ASSERT_TRUE(cache.contains(2));
+    ASSERT_FALSE(cache.contains(3)); // Evicted by LFU
+    ASSERT_TRUE(cache.contains(4));
+}
+
+TEST(Cache, MultiThreadedConcurrentAccess) {
+    using ConcurrentCache = ginnunga::SparseCache<
+        uint64_t,
+        int,
+        ginnunga::storage::SimdFlatMap<uint64_t, int>,
+        ginnunga::eviction::ARCPolicy<uint64_t>,
+        ginnunga::concurrency::EpochReclamation
+    >;
+
+    ConcurrentCache cache(500);
+
+    // Seed cache
+    for (uint64_t i = 1; i <= 50; ++i) {
+        cache.put(i, static_cast<int>(i * 10));
+    }
+
+    constexpr int NUM_THREADS = 4;
+    std::vector<std::thread> workers;
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        workers.emplace_back([&cache, t]() {
+            for (int op = 0; op < 50; ++op) {
+                uint64_t key = (op + t) % 50 + 1;
+                auto val = cache.get(key);
+                if (val.has_value()) {
+                    ASSERT_EQ(*val, static_cast<int>(key * 10));
+                }
+                // Also perform occasional concurrent put
+                if (op % 5 == 0) {
+                    cache.put(100 + t * 100 + op, op);
+                }
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    ASSERT_TRUE(cache.size() >= 50);
 }

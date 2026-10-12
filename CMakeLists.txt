@@ -46,6 +46,12 @@ target_include_directories(ginnunga INTERFACE
 add_library(ginnunga_core STATIC src/ginnunga.cpp)
 target_link_libraries(ginnunga_core PUBLIC ginnunga)
 
+option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
+if(ENABLE_COVERAGE)
+    add_compile_options(-fprofile-instr-generate -fcoverage-mapping -O0 -g)
+    add_link_options(-fprofile-instr-generate)
+endif()
+
 # Enable testing
 enable_testing()
 
@@ -55,6 +61,8 @@ add_executable(ginnunga_tests
     tests/test_storage.cpp
     tests/test_eviction.cpp
     tests/test_concurrency.cpp
+    tests/test_memory.cpp
+    tests/test_telemetry.cpp
     tests/test_cache.cpp
 )
 target_link_libraries(ginnunga_tests PRIVATE ginnunga ginnunga_core)

@@ -21,6 +21,7 @@ TEST(Concurrency, SingleThreaded) {
 TEST(Concurrency, EpochReclamation) {
     ginnunga::concurrency::EpochReclamation ebr;
 
+    ASSERT_EQ(ebr.current_epoch(), 0);
     std::atomic<bool> retired_called{false};
 
     // Thread 1 acquires read
@@ -32,10 +33,23 @@ TEST(Concurrency, EpochReclamation) {
         retired_called.store(true);
     });
 
+    // Retire empty lambda (no-op guard)
+    ebr.retire({});
+
+    // Retire >= 65 callbacks to test try_advance_epoch_locked threshold
+    std::atomic<int> batch_reclaimed{0};
+    for (int i = 0; i < 70; ++i) {
+        ebr.retire([&batch_reclaimed]() {
+            batch_reclaimed.fetch_add(1);
+        });
+    }
+
     ebr.release_read();
     ebr.synchronize();
 
     ASSERT_TRUE(retired_called.load());
+    ASSERT_EQ(batch_reclaimed.load(), 70);
+    ASSERT_TRUE(ebr.current_epoch() > 0);
 }
 
 TEST(Concurrency, HazardPointers) {
@@ -48,11 +62,21 @@ TEST(Concurrency, HazardPointers) {
     ASSERT_TRUE(hp.is_hazardous(&sample_node));
     ASSERT_FALSE(hp.is_hazardous(nullptr));
 
+    // Test retiring callbacks and batch reclamation (triggering >= 32 callback threshold)
+    std::atomic<int> retired_count{0};
+    for (int i = 0; i < 35; ++i) {
+        hp.retire([&retired_count]() {
+            retired_count.fetch_add(1);
+        });
+    }
+
     hp.clear_hazard(slot);
     ASSERT_FALSE(hp.is_hazardous(&sample_node));
 
     hp.release_read();
     hp.synchronize();
+
+    ASSERT_EQ(retired_count.load(), 35);
 }
 
 TEST(Concurrency, ThreadLocalCacheFront) {
@@ -60,11 +84,87 @@ TEST(Concurrency, ThreadLocalCacheFront) {
 
     ASSERT_TRUE(front.local_lookup(10) == nullptr);
 
-    front.local_insert(10, "LocalValue");
-    std::string* val = front.local_lookup(10);
-    ASSERT_TRUE(val != nullptr);
-    ASSERT_EQ(*val, "LocalValue");
+    // ConcurrencyConcept compliance tests
+    ASSERT_EQ(front.acquire_read(), 0);
+    front.release_read();
+    std::atomic<bool> cb_run{false};
+    front.retire([&cb_run]() { cb_run = true; });
+    ASSERT_TRUE(cb_run.load());
+    front.synchronize();
 
+    // Insert and lookup hit
+    front.local_insert(10, "Val10");
+    std::string* pval = front.local_lookup(10);
+    ASSERT_TRUE(pval != nullptr);
+    ASSERT_EQ(*pval, "Val10");
+
+    // Invalidate existing key
     front.local_invalidate(10);
     ASSERT_TRUE(front.local_lookup(10) == nullptr);
+
+    // Invalidate entire local buffer
+    front.local_insert(20, "Val20");
+    front.local_insert(30, "Val30");
+    ASSERT_TRUE(front.local_lookup(20) != nullptr);
+    ASSERT_TRUE(front.local_lookup(30) != nullptr);
+    front.invalidate_local();
+    ASSERT_TRUE(front.local_lookup(20) == nullptr);
+    ASSERT_TRUE(front.local_lookup(30) == nullptr);
+}
+
+TEST(Concurrency, MultiThreadedEpochReclamation) {
+    ginnunga::concurrency::EpochReclamation ebr;
+    constexpr int NUM_READERS = 4;
+    constexpr int NUM_OPS = 200;
+    std::atomic<bool> running{true};
+    std::atomic<int> retired_count{0};
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < NUM_READERS; ++t) {
+        readers.emplace_back([&ebr, &running]() {
+            while (running.load()) {
+                ebr.acquire_read();
+                std::this_thread::yield();
+                ebr.release_read();
+            }
+        });
+    }
+
+    // Writer thread retiring actions
+    for (int i = 0; i < NUM_OPS; ++i) {
+        ebr.retire([&retired_count]() {
+            retired_count.fetch_add(1);
+        });
+    }
+
+    // Stop readers
+    running.store(false);
+    for (auto& r : readers) {
+        r.join();
+    }
+
+    // Drain all retired queues
+    ebr.synchronize();
+    ASSERT_EQ(retired_count.load(), NUM_OPS);
+}
+
+TEST(Concurrency, MultiThreadedHazardPointers) {
+    ginnunga::concurrency::HazardPointers hp;
+    constexpr int NUM_THREADS = 4;
+    int protected_values[NUM_THREADS] = {10, 20, 30, 40};
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&hp, &protected_values, t]() {
+            std::size_t slot = hp.acquire_read();
+            hp.publish_hazard(slot, &protected_values[t]);
+            ASSERT_TRUE(hp.is_hazardous(&protected_values[t]));
+            hp.clear_hazard(slot);
+            hp.release_read();
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
 }

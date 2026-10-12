@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory_resource>
+#include <memory>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
