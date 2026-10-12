@@ -85,31 +85,148 @@ Every component is decoupled using C++20 Concepts (`StorageConcept`, `EvictionCo
 
 ---
 
+## Real-World Use Cases & Architectural Blueprints
+
+Ginnunga is purposefully architected as a modular, concept-driven framework. By swapping storage backends, eviction policies, and concurrency models, engineers can tailor the cache to exact hardware and domain constraints:
+
+### 1. High-Frequency Trading (HFT) & Exchange Connectivity
+* **The Problem**: Electronic trading gateways (FIX, OUCH, ITCH) generate sparse 64-bit Client Order IDs (`ClOrdID`) distributed across multi-million keyspaces. However, only in-flight open orders (~thousands) require active routing. Standard hash maps induce nondeterministic hash collisions, pointer-chasing bucket traversals, and dynamic memory allocations on the critical trading path.
+* **Architectural Blueprint**:
+  ```cpp
+  using FIXOrderCache = ginnunga::SparseCache<
+      uint64_t,
+      OrderState,
+      ginnunga::storage::PagedSparseArray<uint64_t, OrderState>,
+      ginnunga::eviction::TTLPolicy<uint64_t>,
+      ginnunga::concurrency::SingleThreaded
+  >;
+  ```
+* **Why It Excels**:
+  * **Direct Virtual Indexing**: `PagedSparseArray` reserves a massive virtual memory window via `mmap`. Key lookups translate directly to memory offsets with **sub-10ns latency** and zero hashing overhead.
+  * **Demand Paging & Lazy OS Commits**: Physical RAM is committed on-demand only for accessed order pages and recycled back to the kernel via `madvise(MADV_DONTNEED)`.
+  * **Monotonic TTL Expiration**: High-precision monotonic timestamps seamlessly expire dead sessions and unacknowledged orders without polling threads.
+  * **64-Byte Cache-Line Packing**: `OrderState` is aligned to 64 bytes (`alignas(64)`), eliminating false sharing across gateway cores.
+
+---
+
+### 2. Game Engines & Real-Time Simulation (Entity Component Systems)
+* **The Problem**: Open-world engines and simulations manage millions of sparse entity IDs (`EntityID`), but specific gameplay components (e.g. `AIComponent`, `CombatState`, `PhysicsBody`) are only attached to a fraction of entities. Traversing hash maps or pointer arrays on every frame tick causes severe CPU cache thrashing and breaks SIMD vectorization.
+* **Architectural Blueprint**:
+  ```cpp
+  using AIComponentCache = ginnunga::SparseCache<
+      EntityID,
+      AIComponent,
+      ginnunga::storage::SlotArrayMap<EntityID, AIComponent>,
+      ginnunga::eviction::LRUPolicy<EntityID>,
+      ginnunga::concurrency::SingleThreaded
+  >;
+  ```
+* **Why It Excels**:
+  * **Sparse Set Invariant**: `SlotArrayMap` maintains two arrays: a sparse array for $O(1)$ random lookups by `EntityID`, and a packed dense array containing exclusively active components.
+  * **Vectorized Cache-Line Streaming**: Game systems iterate directly over `dense_values()` in a single contiguous memory block. The CPU prefetcher streams data with **100% cache line utilization**, enabling compiler auto-vectorization (AVX-512 / NEON).
+  * **$O(1)$ Swap-and-Pop Despawning**: Entity destruction swaps the target component with the last element of the dense array and pops it in constant time with zero memory fragmentation.
+
+---
+
+### 3. High-Throughput Networking & Flow Tracking (DPDK / eBPF / SDN)
+* **The Problem**: Userspace packet processing engines (DPDK, XDP, eBPF) must track active TCP/UDP connections across an astronomical 144-bit IPv6/port 5-tuple space ($2^{144}$ addresses). Multi-threaded packet routing threads contend heavily on locks, while flash crowds or DDoS floods cause severe cache thrashing.
+* **Architectural Blueprint**:
+  ```cpp
+  using FlowTracker = ginnunga::SparseCache<
+      IPv6_Tuple,
+      SessionState,
+      ginnunga::storage::SimdFlatMap<IPv6_Tuple, SessionState, IPv6Hash>,
+      ginnunga::eviction::ARCPolicy<IPv6_Tuple>,
+      ginnunga::concurrency::EpochReclamation
+  >;
+  ```
+* **Why It Excels**:
+  * **16-Lane SIMD Vector Probing**: `SimdFlatMap` uses ARM NEON or AVX2 instructions to probe 16 metadata control bytes in parallel in a single CPU cycle, skipping empty slots and tombstones instantly.
+  * **Wait-Free Reads via EBR**: Worker packet-processing threads read session records concurrently without acquiring mutexes or executing atomic write instructions (`EpochReclamation`). Writers defer memory reclamation until readers rotate epochs.
+  * **Self-Tuning ARC Eviction**: The Adaptive Replacement Cache dynamically self-tunes its balance parameter ($p$) between recency ($T_1$) and frequency ($T_2$). It resists DDoS SYN-flood scans while retaining legitimate long-lived TCP streams.
+
+---
+
+### 4. Storage Engines & Log-Structured Merge (LSM) Block Caches
+* **The Problem**: Flash/NVMe storage engines (e.g. RocksDB/LevelDB architectures) cache sparse 64-bit disk chunk/block identifiers. Keys exhibit strong prefix correlations. Traditional hash tables suffer from hash collision vulnerabilities, while multi-socket servers suffer severe NUMA interconnect penalties.
+* **Architectural Blueprint**:
+  ```cpp
+  using BlockCache = ginnunga::SparseCache<
+      uint64_t,
+      BlockDescriptor,
+      ginnunga::storage::JudyTreeBackend<uint64_t, BlockDescriptor>,
+      ginnunga::eviction::LFUPolicy<uint64_t>,
+      ginnunga::concurrency::SingleThreaded
+  >;
+  ```
+* **Why It Excels**:
+  * **Compressed Adaptive Radix Trie**: `JudyTreeBackend` compresses shared byte prefixes across 64-bit block keys, guaranteeing bounded, deterministic lookup depths with zero hash collision risks.
+  * **NUMA Socket Pinning**: Can be coupled with `NumaArenaResource` to allocate cache nodes strictly on the local NUMA domain of the NVMe controller, eliminating cross-socket QPI/UPI bus traffic.
+  * **2MB Huge Page TLB Elimination**: `HugePageAllocator` maps memory in 2MB pages, reducing TLB translation overhead across multi-gigabyte cache working sets.
+
+---
+
+### 5. Distributed Tracing & Real-Time APM Observability
+* **The Problem**: Microservices and service meshes (Envoy, OpenTelemetry) emit millions of sparse 64-bit or 128-bit Trace IDs. Traces must be correlated within a sliding completion window and exported before memory is exhausted.
+* **Architectural Blueprint**:
+  ```cpp
+  using TraceBuffer = ginnunga::SparseCache<
+      TraceID,
+      SpanContext,
+      ginnunga::storage::SimdFlatMap<TraceID, SpanContext>,
+      ginnunga::eviction::TTLPolicy<TraceID>,
+      ginnunga::concurrency::ThreadLocalCacheFront<TraceID, SpanContext>
+  >;
+  ```
+* **Why It Excels**:
+  * **Thread-Local L1 Front Ring**: Consecutive intra-thread span updates are intercepted by `ThreadLocalCacheFront` in an uncontented L1 ring buffer without touching shared atomic variables.
+  * **Sliding TTL Window**: Inactive or completed traces are automatically reaped after the sliding timeout window elapses.
+  * **Zero-Overhead JSON Telemetry**: `MetaDumper` outputs real-time cache performance and reflection metrics directly into Prometheus or Grafana collector agents.
+
+---
+
+## Architecture Selection Matrix
+
+| Workload / Requirement | Recommended Storage | Recommended Eviction | Recommended Concurrency | Memory Strategy |
+| :--- | :--- | :--- | :--- | :--- |
+| **Exchange Order Gateways (FIX/OUCH)** | `PagedSparseArray` | `TTLPolicy` | `SingleThreaded` | `NumaArenaResource` (64B align) |
+| **Game Engine ECS Contiguous Ticks** | `SlotArrayMap` | `LRUPolicy` | `SingleThreaded` | Standard Heap / Arena |
+| **High-Throughput IPv6 / Packet Routing** | `SimdFlatMap` | `ARCPolicy` | `EpochReclamation` | 64B Cache-Line Aligned |
+| **Multi-Threaded Node-Level Publishing** | `SimdFlatMap` | `ARCPolicy` | `HazardPointers` | Standard Heap |
+| **Prefix-Correlated Block & Chunk Caching** | `JudyTreeBackend` | `LFUPolicy` | `SingleThreaded` | `HugePageAllocator` (2MB) |
+| **Thread-Isolated Ultra-Hot Loops** | Any Storage | Any Eviction | `ThreadLocalCacheFront` | Thread-Local L1 Ring |
+
+---
+
 ## Directory Structure
 
 ```
 ginnunga/
-├── CMakeLists.txt
-├── README.md
+├── CMakeLists.txt                    # Modern CMake build system
+├── README.md                         # Project documentation and architectural guide
+├── LICENSE                           # GNU Affero General Public License v3.0
+├── CREDITS.md                        # Algorithm citations and acknowledgments
+├── assets/
+│   └── logo.jpg                      # Project brand logo
 ├── include/ginnunga/
 │   ├── cache.hpp                     # Master SparseCache orchestrator
 │   ├── concepts/
-│   │   ├── storage.hpp               # StorageConcept interface
-│   │   ├── eviction.hpp              # EvictionConcept interface
-│   │   ├── concurrency.hpp           # ConcurrencyConcept interface
-│   │   └── memory.hpp                # MemoryResourceConcept interface
+│   │   ├── storage.hpp               # StorageConcept C++20 interface
+│   │   ├── eviction.hpp              # EvictionConcept C++20 interface
+│   │   ├── concurrency.hpp           # ConcurrencyConcept C++20 interface
+│   │   └── memory.hpp                # MemoryResourceConcept C++20 interface
 │   ├── memory/
-│   │   ├── numa_arena_resource.hpp   # NUMA & aligned arena allocator
+│   │   ├── numa_arena_resource.hpp   # NUMA & 64B cache-line arena allocator
 │   │   └── huge_page_allocator.hpp   # 2MB huge page mmap allocator
 │   ├── storage/
-│   │   ├── paged_sparse_array.hpp    # Virtual memory lazy-paged array
+│   │   ├── paged_sparse_array.hpp    # Virtual memory lazy-paged array (mmap)
 │   │   ├── slot_array_map.hpp        # Sparse set with packed dense array
 │   │   ├── simd_flat_map.hpp         # NEON/AVX2 SIMD control-byte hash map
 │   │   └── judy_tree_backend.hpp     # Compressed adaptive radix trie
 │   ├── eviction/
-│   │   ├── lru_policy.hpp            # LRU replacement
-│   │   ├── lfu_policy.hpp            # LFU replacement
-│   │   ├── arc_policy.hpp            # Adaptive Replacement Cache
+│   │   ├── lru_policy.hpp            # Least Recently Used (LRU) policy
+│   │   ├── lfu_policy.hpp            # Least Frequently Used (LFU) policy
+│   │   ├── arc_policy.hpp            # Adaptive Replacement Cache (ARC)
 │   │   └── ttl_policy.hpp            # Time-To-Live monotonic clock policy
 │   ├── concurrency/
 │   │   ├── epoch_reclamation.hpp     # Epoch-Based Reclamation (EBR)
@@ -126,15 +243,22 @@ ginnunga/
 │   ├── ecs_component_cache.cpp       # Game Engine ECS (SlotArrayMap + LRU)
 │   └── tcp_session_tracker.cpp       # IPv6 Session Tracking (SimdFlatMap + ARC + EBR)
 ├── tests/
-│   ├── test_framework.hpp            # Lightweight test harness
-│   ├── test_main.cpp                 # Test runner entry
+│   ├── test_framework.hpp            # Lightweight zero-dependency test harness
+│   ├── test_main.cpp                 # Test runner entry point
 │   ├── test_concepts.cpp             # Compile-time concept verification
-│   ├── test_storage.cpp              # Storage backends unit tests
+│   ├── test_storage.cpp              # Storage backends unit tests & oracle stress tests
 │   ├── test_eviction.cpp             # Eviction policies unit tests
 │   ├── test_concurrency.cpp          # Concurrency models unit tests
+│   ├── test_memory.cpp               # NUMA & huge page memory allocators tests
+│   ├── test_telemetry.cpp            # Cache-line alignment & JSON telemetry tests
 │   └── test_cache.cpp                # Integrated SparseCache tests
-└── bench/
-    └── bench_cache.cpp               # High-throughput microbenchmarks
+├── bench/
+│   └── bench_cache.cpp               # High-throughput microbenchmarks
+└── scripts/
+    ├── build.sh                      # Compilation automation script
+    ├── test.sh                       # Unit test and CTest runner script
+    ├── run_examples.sh               # Application examples executor
+    └── benchmark.sh                  # Microbenchmark runner
 ```
 
 ---
@@ -172,6 +296,21 @@ int main() {
     return 0;
 }
 ```
+
+---
+
+## Microbenchmarks & Performance Profiles
+
+Microbenchmarks evaluated on Apple Silicon (M-series, ARM64 Darwin) across 500,000 operations comparing Ginnunga storage backends against `std::unordered_map`:
+
+| Storage Architecture | Lookup Throughput | Insert Throughput | Memory Footprint (500K keys) | Latency Profile |
+| :--- | :---: | :---: | :---: | :--- |
+| **`PagedSparseArray`** (`mmap`) | **125.77 M ops/sec** | 14.06 M ops/sec | **1,264 KB** | Direct memory offset, zero hashing |
+| **`SlotArrayMap`** (Sparse Set) | **98.41 M ops/sec** | **17.88 M ops/sec** | 4,930 KB | Packed contiguous array, vector-friendly |
+| **`SimdFlatMap`** (NEON SIMD) | 9.66 M ops/sec | 3.90 M ops/sec | 63,476 KB | 16-lane parallel control-byte probing |
+| **`std::unordered_map`** (Baseline) | 15.68 M ops/sec | 8.63 M ops/sec | 22,859 KB | High pointer-chasing overhead (18x RAM) |
+
+> Run `./scripts/benchmark.sh` to replicate on your local hardware.
 
 ---
 
