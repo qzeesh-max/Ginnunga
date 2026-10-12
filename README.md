@@ -175,7 +175,22 @@ int main() {
 - Modern C++ compiler supporting C++20 or C++26 (Apple Clang 15+, Clang 16+, GCC 12+)
 - CMake 3.22+
 
-### Build
+### Convenience Scripts
+```bash
+# Build the project (Release mode by default)
+./scripts/build.sh
+
+# Run the complete unit test suite and CTest
+./scripts/test.sh
+
+# Run all application examples (or pass: fix_order, ecs, tcp)
+./scripts/run_examples.sh
+
+# Run microbenchmarks
+./scripts/benchmark.sh
+```
+
+### Manual CMake Build
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
